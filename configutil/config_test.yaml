@@ -1,0 +1,14 @@
+volumes:
+  - AWSVolumeID: "vol-0abcd1234efgh5678"
+    AWSDeviceName: "/dev/sdf"
+    AWSRegion: "ap-southeast-2"
+    IncrementSizeGB: 10
+    IncrementSizePercent: 20
+    ResizeThreshold: 30
+  - AWSVolumeID: "vol-0efgh5678abcd1234"
+    AWSDeviceName: "/dev/sdg"
+    AWSRegion: "ap-southeast-2"
+    IncrementSizeGB: 20
+    IncrementSizePercent: 30
+    ResizeThreshold: 40
+checkIntervalSeconds: 30
