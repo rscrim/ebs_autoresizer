@@ -44,9 +44,9 @@ func InitialiseEBSVolumeState() EBSVolumeState {
 // returns : Event created event
 func CreateVolumeStateEvent(volumeState EBSVolumeState, success bool) Event {
 	event := InitialiseEvent()
-	event.SetEventTime(time.Now())
-	event.SetVolumeState(volumeState)
-	event.SetExecutionSuccess(success)
+	event.EventTime = time.Now()
+	event.VolumeState = volumeState
+	event.ExecutionSuccess = success
 	return event
 }
 
@@ -57,9 +57,9 @@ func CreateVolumeStateEvent(volumeState EBSVolumeState, success bool) Event {
 // returns : Event created event
 func CreateVolumeResizeActionEvent(volumeAction EBSVolumeResize, success bool) Event {
 	event := InitialiseEvent()
-	event.SetEventTime(time.Now())
-	event.SetVolumeAction(volumeAction)
-	event.SetExecutionSuccess(success)
+	event.EventTime = time.Now()
+	event.VolumeAction = volumeAction
+	event.ExecutionSuccess = success
 	return event
 }
 
@@ -70,8 +70,8 @@ func CreateVolumeResizeActionEvent(volumeAction EBSVolumeResize, success bool) E
 // returns : Event created event
 func CreateFSActionEvent(fsAction FilesystemResize, success bool) Event {
 	event := InitialiseEvent()
-	event.SetEventTime(time.Now())
-	event.SetFSAction(fsAction)
-	event.SetExecutionSuccess(success)
+	event.EventTime = time.Now()
+	event.FSAction = fsAction
+	event.ExecutionSuccess = success
 	return event
 }

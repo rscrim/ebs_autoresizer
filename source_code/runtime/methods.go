@@ -1,30 +1,9 @@
 package runtime
 
 import (
-	"ebs-monitor/logger"
 	"fmt"
 	"time"
 )
-
-// Initialise logger
-var l = logger.NewLogger()
-
-/*
--------------------------
-Methods for Runtime Struct
--------------------------
-*/
-// SetConfiguration sets the configuration for the Runtime.
-// cfg : Config The configuration to be set.
-func (runtime *Runtime) SetConfiguration(cfg Config) {
-	runtime.Configuration = cfg
-}
-
-// SetDebugMode sets the debug mode for the Runtime.
-// debugMode : bool The debug mode to be set.
-func (runtime *Runtime) SetDebugMode(debugMode bool) {
-	runtime.DebugMode = debugMode
-}
 
 /*
 -------------------------
@@ -42,37 +21,6 @@ func (cfg *Config) AddEBSVolumeConfigs(volumes ...EBSVolumeConfig) {
 // interval : time.Duration Check interval to be set.
 func (cfg *Config) SetCheckInterval(interval int) {
 	cfg.CheckIntervalSeconds = interval
-}
-
-/*
--------------------------
-Methods for Event Struct
--------------------------
-*/
-
-// SetEventTime sets the time of the event.
-func (e *Event) SetEventTime(t time.Time) {
-	e.EventTime = t
-}
-
-// SetVolumeState sets the snapshot of EBS volume at the time of the event.
-func (e *Event) SetVolumeState(vs EBSVolumeState) {
-	e.VolumeState = vs
-}
-
-// SetVolumeAction sets the resize action taken on the EBS volume.
-func (e *Event) SetVolumeAction(va EBSVolumeResize) {
-	e.VolumeAction = va
-}
-
-// SetFSAction sets the filesystem resize action.
-func (e *Event) SetFSAction(fsa FilesystemResize) {
-	e.FSAction = fsa
-}
-
-// SetExecutionSuccess sets the flag indicating if the action executed successfully.
-func (e *Event) SetExecutionSuccess(es bool) {
-	e.ExecutionSuccess = es
 }
 
 /*
@@ -108,24 +56,21 @@ func (history *Event) AddFilesystemResize(fsAction FilesystemResize, executionSu
 // volumeID : string - The AWS Volume ID of the volume the event is associated with.
 // event : Event - The event to be added to the log.
 // logger : *logger.Logger - The logger to log the event.
-func (eventLog EventLog) AddEvent(volumeID string, event Event) {
+func (eventLog EventLog) AddEvent(volumeID string, event Event) (map[string]interface{}, error) {
 	// Extracts existing events from event log
 	existingEvents, exists := eventLog[volumeID]
 
 	// Checks for event duplication
 	if exists {
 		for _, existingEvent := range existingEvents {
-			if existingEvent.EventTime == event.EventTime && existingEvent.ExecutionSuccess == event.ExecutionSuccess {
+			if existingEvent.Equals(event) {
 				// The event is a duplicate, return without adding it
-				return
+				return nil, nil
 			}
 		}
 	}
 
 	eventLog[volumeID] = append(existingEvents, event)
-
-	// Log the event using the logger
-	message := fmt.Sprintf("Event for volume %s: VolumeAction = %s, FSAction = %s, Success = %v", volumeID, event.VolumeAction.AWSDeviceName, event.FSAction.AWSDeviceName, event.ExecutionSuccess)
 	fields := map[string]interface{}{
 		"AWSVolumeID":      volumeID,
 		"EventTime":        event.EventTime,
@@ -144,12 +89,11 @@ func (eventLog EventLog) AddEvent(volumeID string, event Event) {
 		failedAction = "Resize the filesystem"
 	}
 
-	if event.ExecutionSuccess {
-		l.Log(logger.LogDebug, message, fields)
-	} else {
-		failureMessage := fmt.Sprintf("Action failed: %s. Failed to: %s", message, failedAction)
-		l.Log(logger.LogError, failureMessage, fields)
+	if !event.ExecutionSuccess {
+		return fields, fmt.Errorf("Action failed. Failed to: %s", failedAction)
 	}
+
+	return fields, nil
 
 }
 

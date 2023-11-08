@@ -1,0 +1,7 @@
+Package: ebs-autoresizer
+Version: 2.2.4
+Section: admin
+Priority: optional
+Architecture: all
+Maintainer: Ryan Scrim <https://github.com/rscrim>
+Description: Automated monitoring and resizing of non-root EBS volumes attached to an EC2 instance.

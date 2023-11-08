@@ -1,0 +1,47 @@
+#!/bin/sh
+
+# add the ebs-monitor user if it doesn't already exist
+if ! getent passwd ebs-monitor > /dev/null 2>&1; then
+    useradd -r -d /var/lib/ebs-monitor -s /bin/false ebs-monitor
+    usermod -L ebs-monitor
+fi
+
+# allow the ebs-monitor user to run necessary commands as root without a password
+echo 'ebs-monitor ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /sbin/resize2fs, /usr/sbin/xfs_growfs' > /tmp/ebs-monitor
+visudo -cf /tmp/ebs-monitor
+if [ $? -eq 0 ]; then
+    mv /tmp/ebs-monitor /etc/sudoers.d/ebs-monitor
+else
+    echo "Could not validate sudoers file. Not making changes."
+    exit 1
+fi
+chmod 0440 /etc/sudoers.d/ebs-monitor
+
+# Check if /etc/ebs-monitor default config directory exists, create it if not
+if [ ! -d "/etc/ebs-monitor" ]; then
+    mkdir -p /etc/ebs-monitor
+    chown ebs-monitor:ebs-monitor /etc/ebs-monitor
+    chmod 0755 /etc/ebs-monitor
+fi
+
+# Set up application directories and permissions
+chown ebs-monitor:ebs-monitor /usr/local/bin/ebsmon
+chmod 0755 /usr/local/bin/ebsmon
+
+# reload systemd configuration
+systemctl daemon-reload
+
+# fix the permissions for ebs-monitor.service
+chmod 0644 /etc/systemd/system/ebs-monitor.service
+
+# enable the service to start on boot
+systemctl enable ebs-monitor.service
+
+# start the service
+systemctl start ebs-monitor.service
+
+# Note: The application is not triggered to run on installation
+# This is intentional as Ansible will create the config.yaml in
+# /etc/ebs-monitor and then start the service.
+# This prevents a failure on installation as the configuration
+# has not yet been created.

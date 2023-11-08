@@ -6,46 +6,6 @@ import (
 	"time"
 )
 
-// TestSetConfiguration tests the SetConfiguration method of the Runtime struct.
-// It checks if the configuration has been correctly set.
-func TestSetConfiguration(t *testing.T) {
-	runtime := InitialiseRuntime()
-	cfg := *InitialiseConfig()
-
-	// "want" represents the expected outcome
-	want := cfg
-
-	// Setting configuration
-	runtime.SetConfiguration(cfg)
-
-	// "got" represents the actual outcome
-	got := runtime.Configuration
-
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("SetConfiguration() = %v, want %v", got, want)
-	}
-}
-
-// TestSetDebugMode tests the SetDebugMode method of the Runtime struct.
-// It checks if the debug mode has been correctly set.
-func TestSetDebugMode(t *testing.T) {
-	runtime := InitialiseRuntime()
-	debugMode := true
-
-	// "want" represents the expected outcome
-	want := debugMode
-
-	// Setting debug mode
-	runtime.SetDebugMode(debugMode)
-
-	// "got" represents the actual outcome
-	got := runtime.DebugMode
-
-	if got != want {
-		t.Errorf("SetDebugMode() = %v, want %v", got, want)
-	}
-}
-
 // TestAddEBSVolumeConfigs tests the AddEBSVolumeConfigs method of the Config struct.
 // It checks if the EBS volumes have been correctly added to the Config's list of volumes.
 func TestAddEBSVolumeConfigs(t *testing.T) {

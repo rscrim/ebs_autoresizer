@@ -1,0 +1,12 @@
+[Unit]
+Description=EBS Volume Monitor and Resize Service
+After=network.target
+
+[Service]
+User=ebs-monitor
+Group=ebs-monitor
+ExecStart=/usr/local/bin/ebsmon --config=/etc/ebs-monitor/config.yaml
+StartLimitInterval=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,13 +1,23 @@
 package aws
 
 import (
+	"context"
 	"ebs-monitor/runtime"
+	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"log"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
 
-	// replace this with the actual import path
+	awsv2 "github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
@@ -108,6 +118,29 @@ func GetAllRegions() ([]string, error) {
 	return regions, nil
 }
 
+// getCurrentRegion fetches the current region from EC2 instance metadata using the AWS SDK for Go V2.
+// returns : string : AWS region where the instance is located
+// returns : error : return an error if any occur during the process
+func getCurrentRegion() (string, error) {
+	// Load the default SDK configuration
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		return "", err
+	}
+
+	// Create a new EC2 Instance Metadata Service client
+	client := imds.NewFromConfig(cfg)
+
+	// Use the client to retrieve the region of the instance
+	response, err := client.GetRegion(context.TODO(), &imds.GetRegionInput{})
+	if err != nil {
+		log.Printf("Unable to retrieve the region from the EC2 instance: %v\n", err)
+		return "", err
+	}
+
+	return response.Region, nil
+}
+
 // ValidateVolumeID : checks if the provided Volume ID is valid
 // volumeID : string : AWS EBS volume ID to validate
 // region : string : AWS region where the volume is located
@@ -133,22 +166,22 @@ func ValidateVolumeID(volumeID, region string) (bool, error) {
 	return true, nil
 }
 
-// getInstanceID : Fetches the instance ID of the current instance from AWS EC2 metadata
+// getInstanceID : Fetches the instance ID of the current instance using AWS SDK's IMDS client
 // Returns: string : The instance ID of the current instance
 // error : error : An error that occurred while getting the instance ID, or nil if no error occurred
 func getInstanceID() (string, error) {
-	resp, err := http.Get("http://169.254.169.254/latest/meta-data/instance-id")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		return "", err
 	}
 
-	return string(body), nil
+	client := imds.NewFromConfig(cfg)
+	resp, err := client.GetInstanceIdentityDocument(context.TODO(), &imds.GetInstanceIdentityDocumentInput{})
+	if err != nil {
+		return "", err
+	}
+
+	return resp.InstanceID, nil
 }
 
 // GetVolumeIDByDeviceName : Fetches the volume ID attached to a specific device name of the current instance
@@ -337,4 +370,188 @@ func ResizeVolume(config runtime.EBSVolumeConfig, newSize int64) error {
 	}
 
 	return nil
+}
+
+// ChatbotMessage is a struct that reflects the message format for Chatbot to post to Slack
+type ChatbotMessage struct {
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	NextSteps   []string `json:"nextSteps,omitempty"`
+}
+
+// PublishToSNS publishes a structured message to an SNS topic.
+// arn: string - ARN of the SNS topic.
+// snsRegion: string - AWS region of the SNS topic.
+// message: ChatbotMessage - The structured message to be published.
+// returns: error - Returns an error if any occur during the process.
+func PublishToSNS(arn string, snsRegion string, messageDescription string) error {
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(snsRegion))
+	if err != nil {
+		return fmt.Errorf("unable to load SDK config, %v", err)
+	}
+
+	// Get AWS account number
+	stsClient := sts.NewFromConfig(cfg)
+	identity, err := stsClient.GetCallerIdentity(context.TODO(), &sts.GetCallerIdentityInput{})
+	if err != nil {
+		return fmt.Errorf("unable to get AWS account number, %v", err)
+	}
+	accountNumber := awsv2.ToString(identity.Account)
+
+	// Get instance hostname
+	hostname, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("unable to get hostname, %v", err)
+	}
+
+	// Get region of EC2 instance running ebs-monitor.service
+	instanceRegion, err := getCurrentRegion()
+
+	if err != nil {
+		return fmt.Errorf("unable to get instance region, %v", err)
+	}
+
+	// Fetch the versions of ebs-monitor.service
+	runningVersion, latestVersion, err := GetEBSVersions()
+	if err != nil {
+		// Handle the error or set versions to a default or error value
+		runningVersion, latestVersion = "unknown", "unknown"
+		fmt.Println("Error: ", err)
+	}
+
+	// Construct enriched message
+	msgContent := ChatbotMessage{
+		Title:       fmt.Sprintf(":no_entry: ebsmon-alert: %s", hostname),
+		Description: messageDescription,
+		NextSteps: []string{
+			fmt.Sprintf("Hostname: %s", hostname),
+			fmt.Sprintf("Account Number: %s", accountNumber),
+			fmt.Sprintf("Region: %s", instanceRegion),
+			fmt.Sprintf("Running Version: %s", runningVersion),
+			fmt.Sprintf("Latest Available Version: %s", latestVersion),
+		},
+	}
+
+	// Check if an update is needed and include a warning message if so
+	if runningVersion < latestVersion {
+		msgContent.NextSteps = append(msgContent.NextSteps, fmt.Sprintf(":warning: ebs-monitor needs to be updated from version %s to %s", runningVersion, latestVersion))
+	}
+	if runningVersion > latestVersion {
+		msgContent.NextSteps = append(msgContent.NextSteps, fmt.Sprintf(":grey_exclamation: ebs-monitor is running a pre-release version... this may lead to issues.\n\t\tRunning: %s\n\t\tAvailable: %s", runningVersion, latestVersion))
+	}
+
+	// Create message struct to post
+	message := map[string]interface{}{
+		"version": "1.0",
+		"source":  "custom",
+		"content": msgContent,
+	}
+
+	messageJSON, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("unable to marshal message to JSON, %v", err)
+	}
+
+	// Publish the enriched message to SNS
+	client := sns.NewFromConfig(cfg)
+	_, err = client.Publish(context.TODO(), &sns.PublishInput{
+		Message:  aws.String(string(messageJSON)),
+		TopicArn: aws.String(arn),
+	})
+	if err != nil {
+		return fmt.Errorf("unable to publish message to SNS, %v", err)
+	}
+
+	return nil
+}
+
+// CheckVolumeState checks the modification state of the specified EBS volume.
+// It returns true if the volume is in the 'optimizing' state, false otherwise.
+// config : runtime.EBSVolumeConfig : configuration of the EBS volume
+// returns : bool : returns true if the volume is in the 'optimizing' state, false otherwise
+// returns : error : returns an error if any occur during the process
+func CheckVolumeState(config runtime.EBSVolumeConfig) (bool, error) {
+	// Create a new session
+	svc := NewSession(config.AWSRegion)
+
+	// Define input for DescribeVolumesModifications call
+	input := &ec2.DescribeVolumesModificationsInput{
+		VolumeIds: []*string{
+			aws.String(config.AWSVolumeID),
+		},
+	}
+
+	// Call DescribeVolumesModifications API
+	result, err := svc.DescribeVolumesModifications(input)
+	if err != nil {
+		// Check for the specific error of no modifications
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case "InvalidVolumeModification.NotFound":
+				return false, nil // No modifications, return false with no error
+			default:
+				return false, fmt.Errorf("failed to get volume modification information from AWS. error: %w", err)
+			}
+		} else {
+			return false, fmt.Errorf("failed to get volume modification information from AWS. error: %w", err)
+		}
+	}
+
+	// Check if volume modification was found
+	if len(result.VolumesModifications) == 0 {
+		return false, fmt.Errorf("failed to find volume modification information. error: %w", err)
+	}
+
+	// Check the modification state of the volume
+	if *result.VolumesModifications[0].ModificationState == ec2.VolumeModificationStateOptimizing {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// -----------------------------------------------------------------
+// IT IS NOT A GOOD PLACE TO PUT THIS FUNCTIONHERE
+// BUT I COULDN'T THINK OF WHERE ELSE FOR IT TO GO WITHOUT INTRODUCING
+// CIRCULAR DEPENDENCIES.. SO HERE WE ARE
+// -----------------------------------------------------------------
+
+// GetEBSVersions : fetches the running version and the latest available version of ebs-monitor.service.
+// returns : string : Running version of the ebs-monitor.service
+// returns : string : Latest available version for installation
+// returns : error : Potential errors during the operation
+func GetEBSVersions() (string, string, error) {
+	// Get the running version
+	cmd := exec.Command("ebsmon", "--version")
+	runningVersionBytes, err := cmd.Output()
+	if err != nil {
+		return "", "", err
+	}
+	runningVersion := strings.TrimSpace(string(runningVersionBytes))
+
+	// Get the version details using apt-cache policy
+	cmd = exec.Command("apt-cache", "policy", "ebs-monitor")
+	aptOutputBytes, err := cmd.Output()
+	if err != nil {
+		return runningVersion, "", err
+	}
+	aptOutput := string(aptOutputBytes)
+
+	// Extract the installed version
+	reInstalled := regexp.MustCompile(`Installed: (\d+\.\d+\.\d+)`)
+	matchesInstalled := reInstalled.FindStringSubmatch(aptOutput)
+	if len(matchesInstalled) < 2 {
+		return runningVersion, "", fmt.Errorf("could not extract installed version from apt output")
+	}
+	installedVersion := matchesInstalled[1]
+
+	// Extract the candidate version
+	reCandidate := regexp.MustCompile(`Candidate: (\d+\.\d+\.\d+)`)
+	matchesCandidate := reCandidate.FindStringSubmatch(aptOutput)
+	if len(matchesCandidate) < 2 {
+		return installedVersion, "", fmt.Errorf("could not extract candidate version from apt output")
+	}
+	candidateVersion := matchesCandidate[1]
+
+	return installedVersion, candidateVersion, nil
 }

@@ -1,0 +1,21 @@
+#!/bin/sh
+
+# Disable the service and reset the systemd state
+systemctl disable ebs-monitor.service || true
+systemctl reset-failed ebs-monitor.service || true
+
+# Stop the service before removing the package
+systemctl stop ebs-monitor.service || true
+
+# Remove /etc/ebs-monitor directory if it exists
+if [ -d "/etc/ebs-monitor" ]; then
+    rm -rf /etc/ebs-monitor
+fi
+
+# Remove the ebs-monitor user and its sudoers file
+userdel ebs-monitor
+rm -f /etc/sudoers.d/ebs-monitor
+
+# remove the service configuration
+rm -f /etc/systemd/system/ebs-monitor.service
+rm -f /usr/local/bin/ebsmon

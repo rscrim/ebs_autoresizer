@@ -1,9 +1,11 @@
 package logger
 
 import (
+	"ebs-monitor/aws"
 	"fmt"
 	"log/syslog"
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	logrus_syslog "github.com/sirupsen/logrus/hooks/syslog"
@@ -24,6 +26,10 @@ type Logger struct {
 	logger    *logrus.Logger
 	debugMode bool
 }
+
+// SNS topic ARN
+var snsARN = "<AWS ARN>"
+var snsRegion = "ap-southeast-2"
 
 // NewLogger creates a new Logger object with logrus as the underlying logger.
 // Returns a new Logger object.
@@ -55,6 +61,24 @@ func NewLogger() *Logger {
 func (l *Logger) Log(level Level, message string, fields map[string]interface{}) {
 	entry := l.logger.WithFields(fields)
 
+	if level != LogDebug {
+		// Convert the fields to a string, formatted for readability
+		fieldStrs := make([]string, 0, len(fields))
+		for key, value := range fields {
+			fieldStrs = append(fieldStrs, fmt.Sprintf("%s: %v", key, value))
+		}
+		fieldsStr := strings.Join(fieldStrs, ",\n\t")
+
+		// Combine the message and fields into a single string with a formatted context section
+		combinedMessage := fmt.Sprintf("%s\nAdditional Information:\n    %s", message, fieldsStr)
+
+		// Sending the combined log message to the SNS queue
+		err := aws.PublishToSNS(snsARN, snsRegion, combinedMessage)
+		if err != nil {
+			entry.WithField("SNSPublishError", err).Error("Failed to publish error message to SNS")
+		}
+	}
+
 	switch level {
 	case LogDebug:
 		fmt.Printf("DEBUG: %s\n", message)
@@ -70,7 +94,7 @@ func (l *Logger) Log(level Level, message string, fields map[string]interface{})
 		entry.Info(message)
 	}
 
-	if l.debugMode && level > LogInfo {
+	if l.debugMode {
 		fmt.Printf("DEBUG: %s\n", message)
 	}
 }

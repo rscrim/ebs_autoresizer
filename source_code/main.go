@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	rt "runtime"
 	"strings"
 	"time"
 
@@ -22,12 +23,21 @@ var l = logger.NewLogger()
 // How many consecutive errors before a volume is removed from monitoring
 const errorThreshold = 5
 
+// Version of the application
+var version string
+
 // rootCmd : The root command for the EBS monitor CLI
 var rootCmd = &cobra.Command{
 	Use:   "ebs-monitor",
 	Short: "EBS Monitor is a tool to monitor and resize attached AWS EBS volumes.",
 	Long:  `An Ubuntu CLI tool to monitor and automatically resize AWS EBS volumes based on a supplied config.yaml file.`,
-	Run:   run,
+	Run: func(cmd *cobra.Command, args []string) {
+		if getVersion, _ := cmd.Flags().GetBool("version"); getVersion {
+			fmt.Println(version)
+			os.Exit(0)
+		}
+		run(cmd, args)
+	},
 }
 
 var (
@@ -41,6 +51,7 @@ var (
 func init() {
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Config file path")
 	rootCmd.PersistentFlags().BoolVarP(&debugMode, "debug", "d", false, "Run in debug mode")
+	rootCmd.Flags().BoolP("version", "v", false, "Show version")
 }
 
 // run : The function that runs the EBS monitor
@@ -60,9 +71,19 @@ func run(cmd *cobra.Command, args []string) {
 	// Load config from file
 	volumes, checkIntervalSeconds, err := LoadConfig(configFile)
 	if err != nil {
-		l.Log(logger.LogError, "Failed to load config", map[string]interface{}{
-			"error":      err,
-			"configFile": configFile,
+		l.Log(logger.LogFatal, "Failed to load config", map[string]interface{}{
+			"config file path": configFile,
+			"error":            err,
+			"configFile":       configFile,
+		})
+		os.Exit(1)
+	}
+
+	// Check if volumes and other configurations are correctly loaded
+	if len(volumes) == 0 || checkIntervalSeconds == 0 {
+		l.Log(logger.LogFatal, "Invalid configuration", map[string]interface{}{
+			"volumes":              volumes,
+			"checkIntervalSeconds": checkIntervalSeconds,
 		})
 		os.Exit(1)
 	}
@@ -72,8 +93,8 @@ func run(cmd *cobra.Command, args []string) {
 	DebugPrint(debugMode, "Loading config from file...")
 	appConfig.AddEBSVolumeConfigs(volumes...)
 	appConfig.SetCheckInterval(checkIntervalSeconds)
-	appRuntime.SetConfiguration(*appConfig)
-	appRuntime.SetDebugMode(debugMode)
+	appRuntime.Configuration = *appConfig
+	appRuntime.DebugMode = debugMode
 	// Set logger debug mode
 	if debugMode {
 		l.SetDebugMode(debugMode)
@@ -112,11 +133,16 @@ func run(cmd *cobra.Command, args []string) {
 			volumeState, err := monitor.GetVolumeState(volume, &eventLog)
 			if err != nil {
 				errorLog[volume.AWSVolumeID]++
+				l.Log(logger.LogError, "Encountered error when getting volume state", map[string]interface{}{
+					"VolumeID":    volume.AWSVolumeID,
+					"Error":       err,
+					"Error Count": errorLog[volume.AWSVolumeID],
+				})
 				DebugPrint(debugMode, "Encountered error when getting volume state, increasing error log count...")
 				DebugPrint(debugMode, fmt.Sprintf("error: %v", err))
 			} else {
-				errorLog[volume.AWSVolumeID] = 0 // Reset the error count on successful operation
-				DebugPrint(debugMode, "Volume state retrieved successfully, resetting error log count...")
+				DebugPrint(debugMode, "Volume state retrieved successfully.")
+
 			}
 
 			// Prints runtime state if debugmode is true
@@ -129,7 +155,10 @@ func run(cmd *cobra.Command, args []string) {
 				event := runtime.CreateVolumeStateEvent(volumeState, false)
 
 				// Add the event to the log
-				eventLog.AddEvent(volume.AWSVolumeID, event)
+				fields, err := eventLog.AddEvent(volume.AWSVolumeID, event)
+				if err != nil {
+					l.Log(logger.LogError, fmt.Sprint(err), fields)
+				}
 
 				// If error threshold has exceeded errorThreshold, drop the volume and log fatal error.
 				if errorLog[volume.AWSVolumeID] >= errorThreshold {
@@ -147,7 +176,10 @@ func run(cmd *cobra.Command, args []string) {
 				event := runtime.CreateVolumeStateEvent(volumeState, true)
 
 				// Add the event to the log
-				eventLog.AddEvent(volume.AWSVolumeID, event)
+				fields, err := eventLog.AddEvent(volume.AWSVolumeID, event)
+				if err != nil {
+					l.Log(logger.LogError, fmt.Sprint(err), fields)
+				}
 
 				// Determine if resize is needed
 				if IsThresholdExceeded(&volumeState, float64(volume.ResizeThreshold)) {
@@ -159,10 +191,13 @@ func run(cmd *cobra.Command, args []string) {
 						DebugPrint(debugMode, fmt.Sprintf("Failed to get current size for volume %s: %v\n", volume.AWSVolumeID, err))
 						DebugPrint(debugMode, fmt.Sprintf("error: %v", err))
 						errorLog[volume.AWSVolumeID]++ // increase error count
+						l.Log(logger.LogError, fmt.Sprintf("Failed to get current size for volume."), map[string]interface{}{
+							"VolumeID":    volume.AWSVolumeID,
+							"Error":       err,
+							"Error Count": errorLog[volume.AWSVolumeID],
+						})
 					} else {
 						var newSize int64
-						errorLog[volume.AWSVolumeID] = 0 // Reset the error count on successful operation
-
 						// Check if IncreaseSizeGB is declared in config.yaml
 						// will be < 0 if not declaed in config.yaml
 						if volume.IncrementSizeGB > 0 {
@@ -178,16 +213,22 @@ func run(cmd *cobra.Command, args []string) {
 
 						// Perform the resize
 						// NOTE: event log logging for resize actions is handled by resize.PerformResize function
-						err = resize.PerformResize(volume, newSize, &eventLog)
+						awsResized, fsResized, err := resize.PerformResize(volume, newSize, &eventLog)
 						if err != nil {
-							l.Log(logger.LogError, fmt.Sprintf("Failed to resize volume"), nil)
 							DebugPrint(debugMode, fmt.Sprintf(" %s: %v\n", volume.AWSVolumeID, err))
 							DebugPrint(debugMode, fmt.Sprintf("error: %v", err))
 							errorLog[volume.AWSVolumeID]++ // increase error count
+							l.Log(logger.LogError, fmt.Sprintf("Failed to resize volume."), map[string]interface{}{
+								"VolumeID":                        volume.AWSVolumeID,
+								"Error":                           err,
+								"Successfully Resized AWS Volume": awsResized,
+								"Successfully Resized Filesystem": fsResized,
+								"Error Count":                     errorLog[volume.AWSVolumeID],
+							})
 						} else {
-							DebugPrint(debugMode, fmt.Sprintf("Successfully resized device: %s from %vGB to %vGB.", volume.AWSDeviceName, currentSize, newSize))
-							l.Log(logger.LogInfo, fmt.Sprintf("Successfully resized device: %s from %vGB to %vGB.", volume.AWSDeviceName, currentSize, newSize), nil)
-							errorLog[volume.AWSVolumeID] = 0 // Reset the error count on successful operation
+							l.Log(logger.LogInfo, fmt.Sprintf(":white_check_mark: Successfully resized device: %s from %vGB to %vGB.", volume.AWSDeviceName, currentSize, newSize), nil)
+							// Reset the error counter after a successful operation
+							errorLog[volume.AWSVolumeID] = 0
 						}
 					}
 
@@ -278,8 +319,9 @@ func LoadConfig(configFile string) (volumes []runtime.EBSVolumeConfig, checkInte
 	volumes, checkIntervalSeconds, err = configutil.GetConfigFromFile(configFile)
 	if err != nil {
 		l.Log(logger.LogError, "Failed to get config from file", map[string]interface{}{
-			"error":      err,
-			"configFile": configFile,
+			"config file location": configFile,
+			"error":                err,
+			"configFile":           configFile,
 		})
 		os.Exit(1)
 	}
@@ -293,15 +335,47 @@ func LoadConfig(configFile string) (volumes []runtime.EBSVolumeConfig, checkInte
 func IsThresholdExceeded(volumeState *runtime.EBSVolumeState, resizeThreshold float64) bool {
 	resizeThresholdGB := volumeState.LocalDiskSizeGB * (resizeThreshold / 100.0)
 
-	fmt.Printf("Volume ID: %v\nResize Threshold (%%): %v\nResize Threshold (GB): %v\n", volumeState.AWSVolumeID, resizeThreshold, resizeThresholdGB)
+	var (
+		plusSeparator = strings.Repeat("+", 25)
+		dashSeparator = strings.Repeat("-", 10)
+	)
+
+	volumeInfo := `
+	%s,
+	Volume: %s
+	%s
+	Current State
+		AWS Volume ID: %s
+		AWS Device Name: %s
+		Local Mount Point: %s
+		%s
+		AWS Device Size (GB): %v
+		Local Disk Size (GB): %0.2f
+		%s
+		Current Used Space (GB): %0.2f
+		Resize Threshold (GB): %0.2f
+		%s
+		Current Used Space(%%): %0.2f
+		Resize Threshold(%%): %0.2f
+	`
+
+	formattedVolumeInfo := fmt.Sprintf(volumeInfo,
+		plusSeparator, volumeState.AWSDeviceName, plusSeparator,
+		volumeState.AWSVolumeID, volumeState.AWSDeviceName, volumeState.LocalMountPoint, dashSeparator,
+		volumeState.AWSDeviceSizeGB, volumeState.LocalDiskSizeGB, dashSeparator,
+		volumeState.UsedSpaceGB, resizeThresholdGB, dashSeparator,
+		(volumeState.UsedSpaceGB/volumeState.LocalDiskSizeGB)*100, resizeThreshold,
+	)
+
+	DebugPrint(debugMode, formattedVolumeInfo)
 
 	if volumeState.UsedSpaceGB > resizeThresholdGB {
 		// Calculate exceeded value
 		exceededBy := volumeState.UsedSpaceGB - resizeThresholdGB
-		DebugPrint(debugMode, fmt.Sprintf("Exceeded threshold by %.2f GB\n", exceededBy))
+		DebugPrint(debugMode, fmt.Sprintf("\n%s\nExceeded threshold by %.2f GB", dashSeparator, exceededBy))
 		return true
 	} else {
-		DebugPrint(debugMode, "Below threshold")
+		DebugPrint(debugMode, fmt.Sprintf("\n%s\nBelow threshold", dashSeparator))
 		return false
 	}
 }
@@ -329,11 +403,16 @@ func PruneAndSleep(eventLog *runtime.EventLog, checkIntervalSeconds int) {
 }
 
 // DebugPrint : used to provide conditional printing of debug messages
-// Helps with code insight when run with --debug flag
+// Helps with debugging when run with --debug flag
 // debugMode : bool - indicates whether to print or not
 // message : string - what to print if true
 func DebugPrint(debugMode bool, message string) {
 	if debugMode {
-		l.Log(logger.LogDebug, fmt.Sprintf("DEBUG: "+message), nil)
+		// Get function name and line number
+		pc, fn, line, _ := rt.Caller(1)
+		functionName := rt.FuncForPC(pc).Name()
+
+		// Print detailed debug information
+		fmt.Printf("[DEBUG] %s %s:%d - %s\n", fn, functionName, line, message)
 	}
 }

@@ -1,0 +1,9 @@
+volumes:
+  - awsDeviceName: "/dev/sde"
+    incrementSizeGB: 10
+    resizeThreshold: 80
+  - awsDeviceName: "/dev/sdi"
+    awsRegion: "ap-southeast-2"
+    incrementSizeGB: 10
+    resizeThreshold: 80
+checkIntervalSeconds: 30
